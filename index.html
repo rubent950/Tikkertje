@@ -1,0 +1,838 @@
+import React, { useState, useEffect, useRef } from 'react';
+import { initializeApp } from 'firebaseapp';
+import { getAuth, signInWithCustomToken, onAuthStateChanged, signOut } from 'firebaseauth';
+import { getFirestore, doc, getDoc, setDoc, updateDoc, onSnapshot, collection, query, where, addDoc, getDocs, deleteDoc, serverTimestamp, Timestamp } from 'firebasefirestore';
+import { User, Plus, Tag, Play, Hand, DoorClosed, History, Trophy, Trash2 } from 'lucide-react';  Icons
+
+ Firebase configuratie en initialisatie
+ Deze variabelen worden automatisch geleverd in de Canvas omgeving.
+const firebaseConfig = typeof __firebase_config !== 'undefined'  JSON.parse(__firebase_config)  {};
+const appId = typeof __app_id !== 'undefined'  __app_id  'default-app-id';
+const initialAuthToken = typeof __initial_auth_token !== 'undefined'  __initial_auth_token  null;
+
+ Functie om milliseconden om te zetten naar een leesbaar formaat (HHMMSS)
+const formatDuration = (ms) = {
+    if (ms === null  isNaN(ms)) return NA;
+    const seconds = Math.floor(ms  1000);
+    const hours = Math.floor(seconds  3600);
+    const minutes = Math.floor((seconds % 3600)  60);
+    const remainingSeconds = seconds % 60;
+
+    const pad = (num) = String(num).padStart(2, '0');
+    return `${pad(hours)}${pad(minutes)}${pad(remainingSeconds)}`;
+};
+
+ Hoofdcomponent van de applicatie
+const App = () = {
+     State variabelen voor Firebase en authenticatie
+    const [db, setDb] = useState(null);
+    const [auth, setAuth] = useState(null);
+    const [userId, setUserId] = useState(null);  Firebase UID
+    const [currentPublicUserId, setCurrentPublicUserId] = useState(null);  Publieke gebruikers-ID
+    const [userRole, setUserRole] = useState('guest');  'guest', 'player', 'admin'
+    const [username, setUsername] = useState('');
+    const [allUsers, setAllUsers] = useState([]);  Lijst van alle geregistreerde gebruikers
+    const [loggedIn, setLoggedIn] = useState(false);
+    const [loading, setLoading] = useState(true);
+    const [isAuthReady, setIsAuthReady] = useState(false);  Nieuwe state om aan te geven dat auth klaar is
+    const [loginError, setLoginError] = useState('');
+    const [showNotificationModal, setShowNotificationModal] = useState(false);
+    const [notificationMessage, setNotificationMessage] = useState('');
+    const [showAddUserModal, setShowAddUserModal] = useState(false);
+    const [newUsername, setNewUsername] = useState('');
+    const [newUserPassword, setNewUserPassword] = useState('');
+    const [addUserError, setAddUserError] = useState('');
+    const [showConfirmDeleteModal, setShowConfirmDeleteModal] = useState(false);  Nieuwe state voor verwijderbevestiging
+    const [userToDeleteDetails, setUserToDeleteDetails] = useState(null);  Details van gebruiker die verwijderd moet worden
+
+     State variabelen voor het spel
+    const [itPlayerId, setItPlayerId] = useState(null);
+    const [itPlayerName, setItPlayerName] = useState('Niemand');
+    const [taggedPlayerId, setTaggedPlayerId] = useState(null);
+    const [taggedPlayerName, setTaggedPlayerName] = useState('Niemand');
+    const [gameActive, setGameActive] = useState(false);
+    const [itStartTime, setItStartTime] = useState(null);  Timestamp wanneer de huidige 'm' speler 'm' werd
+
+     State voor de geschiedenis van 'm'-periodes en het scorebord
+    const [itHistory, setItHistory] = useState([]);
+    const [playerScores, setPlayerScores] = useState([]);  Nieuwe state voor het scorebord
+
+     Ref voor het opslaan van de onSnapshot unsubscribe functie
+    const unsubscribeGameRef = useRef(null);
+    const unsubscribeUsersRef = useRef(null);
+    const unsubscribeItHistoryRef = useRef(null);
+
+     Initialiseer Firebase en luister naar authenticatie veranderingen
+    useEffect(() = {
+        const app = initializeApp(firebaseConfig);
+        const firestore = getFirestore(app);
+        const authentication = getAuth(app);
+
+        setDb(firestore);
+        setAuth(authentication);
+
+         Voer de initiële inlogpoging uit voordat de onAuthStateChanged listener wordt ingesteld
+         Dit zorgt ervoor dat er een gebruiker beschikbaar is voor Firestore-regels.
+        const performInitialAuth = async () = {
+            try {
+                if (initialAuthToken) {
+                    await signInWithCustomToken(authentication, initialAuthToken);
+                } else {
+                    console.warn(Geen initialAuthToken beschikbaar. Gebruiker moet handmatig inloggen.);
+                }
+            } catch (error) {
+                console.error(Fout tijdens initiële Firebase authenticatie, error);
+            } finally {
+                setIsAuthReady(true);  Zet isAuthReady op true, ongeacht succes.
+            }
+        };
+
+        performInitialAuth();
+
+         Stel nu de onAuthStateChanged listener in om te reageren op statuswijzigingen
+        const unsubscribeAuth = onAuthStateChanged(authentication, async (user) = {
+            if (user) {
+                setUserId(user.uid);  Firebase user is aanwezig
+
+                const userProfileDocRef = doc(firestore, `artifacts${appId}users${user.uid}profiledata`);
+                const userProfileDocSnap = await getDoc(userProfileDocRef);
+
+                if (userProfileDocSnap.exists()) {
+                    const userData = userProfileDocSnap.data();
+                    if (userData.username && userData.username !== '' && userData.role !== 'guest') {
+                        setUsername(userData.username);
+                        setUserRole(userData.role);
+                        setCurrentPublicUserId(userData.publicUserId  null);  Laad de publieke ID
+                        setLoggedIn(true);
+                    } else {
+                        setUsername('');
+                        setUserRole('guest');
+                        setCurrentPublicUserId(null);
+                        setLoggedIn(false);
+                    }
+                } else {
+                    setUsername('');
+                    setUserRole('guest');
+                    setCurrentPublicUserId(null);
+                    setLoggedIn(false);
+                }
+            } else {
+                setUserId(null);
+                setUsername('');
+                setUserRole('guest');
+                setCurrentPublicUserId(null);
+                setLoggedIn(false);
+            }
+            setLoading(false);  Laden is voltooid zodra de authenticatiestatus is verwerkt
+        });
+
+        return () = {
+            unsubscribeAuth();
+            if (unsubscribeGameRef.current) unsubscribeGameRef.current();
+            if (unsubscribeUsersRef.current) unsubscribeUsersRef.current();
+            if (unsubscribeItHistoryRef.current) unsubscribeItHistoryRef.current();
+        };
+    }, []);  Lege dependency array, wordt één keer uitgevoerd bij mount
+
+     Setup Ruben's account als deze nog niet bestaat in de publieke lijst
+    useEffect(() = {
+        if (!db  !isAuthReady) return;  Wacht tot db en auth klaar zijn
+
+        const setupRuben = async () = {
+            const rubenQuery = query(collection(db, `artifacts${appId}publicdatausers`), where(username, ==, rubent95));
+            const rubenSnapshot = await getDocs(rubenQuery);
+
+            if (rubenSnapshot.empty) {
+                console.log(Ruben's account wordt aangemaakt in publieke gebruikerslijst...);
+                await addDoc(collection(db, `artifacts${appId}publicdatausers`), {
+                    username 'rubent95',
+                    password '1234',  Voor demo, in echte app gehasht wachtwoord
+                    role 'admin'
+                });
+            }
+        };
+        setupRuben();
+    }, [db, isAuthReady]);
+
+
+     Luister naar wijzigingen in de spelstatus en gebruikerslijst
+    useEffect(() = {
+         Zorg ervoor dat db, authenticatie en applicatie-login klaar zijn voordat listeners worden ingesteld
+        if (!db  !isAuthReady  !loggedIn) {
+             Zorg ervoor dat eventuele oude listeners worden opgeruimd als de login status verandert
+            if (unsubscribeGameRef.current) {
+                unsubscribeGameRef.current();
+                unsubscribeGameRef.current = null;
+            }
+            if (unsubscribeUsersRef.current) {
+                unsubscribeUsersRef.current();
+                unsubscribeUsersRef.current = null;
+            }
+            if (unsubscribeItHistoryRef.current) {
+                unsubscribeItHistoryRef.current();
+                unsubscribeItHistoryRef.current = null;
+            }
+            return;
+        }
+
+         Luister naar spelstatus
+        const gameDocRef = doc(db, `artifacts${appId}publicdatagame_statecurrent`);
+        unsubscribeGameRef.current = onSnapshot(gameDocRef, (docSnap) = {
+            if (docSnap.exists()) {
+                const data = docSnap.data();
+                setItPlayerId(data.itPlayerId);
+                setItPlayerName(data.itPlayerName);
+                setTaggedPlayerId(data.taggedPlayerId);
+                setTaggedPlayerName(data.taggedPlayerName);
+                setGameActive(data.gameActive);
+                setItStartTime(data.itStartTime);
+
+                 Controleer of de huidige gebruiker getikt is, met behulp van currentPublicUserId
+                if (data.taggedPlayerId === currentPublicUserId && data.gameActive) {
+                    showCustomNotification('Je bent getikt!', 'Tijd om te rennen!');
+                }
+            } else {
+                setDoc(gameDocRef, {
+                    itPlayerId null,
+                    itPlayerName 'Niemand',
+                    taggedPlayerId null,
+                    taggedPlayerName 'Niemand',
+                    gameActive false,
+                    itStartTime null
+                }).catch(e = console.error(Fout bij initialiseren spelstatus, e));
+            }
+        }, (error) = {
+            console.error(Fout bij luisteren naar spelstatus, error);
+        });
+
+         Luister naar alle gebruikers
+        const usersCollectionRef = collection(db, `artifacts${appId}publicdatausers`);
+        unsubscribeUsersRef.current = onSnapshot(usersCollectionRef, (snapshot) = {
+            const usersList = snapshot.docs.map(doc = ({ id doc.id, ...doc.data() }));
+            usersList.sort((a, b) = a.username.localeCompare(b.username));
+            setAllUsers(usersList);
+        }, (error) = {
+            console.error(Fout bij luisteren naar gebruikers, error);
+        });
+
+         Luister naar de geschiedenis van 'm'-periodes en aggregeer scores
+        const itHistoryCollectionRef = collection(db, `artifacts${appId}publicdatait_durations`);
+        unsubscribeItHistoryRef.current = onSnapshot(itHistoryCollectionRef, (snapshot) = {
+            const historyList = snapshot.docs.map(doc = ({ id doc.id, ...doc.data() }));
+            historyList.sort((a, b) = (b.endTime.toMillis()  0) - (a.endTime.toMillis()  0));
+            setItHistory(historyList);
+
+            const scores = {};
+            historyList.forEach(entry = {
+                if (entry.userId && entry.durationMs !== undefined) {
+                    if (!scores[entry.userId]) {
+                        scores[entry.userId] = { username entry.username, totalDurationMs 0 };
+                    }
+                    scores[entry.userId].totalDurationMs += entry.durationMs;
+                }
+            });
+
+            const sortedScores = Object.values(scores).sort((a, b) = a.totalDurationMs - b.totalDurationMs);
+            setPlayerScores(sortedScores);
+
+        }, (error) = {
+            console.error(Fout bij luisteren naar 'm'-geschiedenis of scorebord, error);
+        });
+
+        return () = {
+            if (unsubscribeGameRef.current) unsubscribeGameRef.current();
+            if (unsubscribeUsersRef.current) unsubscribeUsersRef.current();
+            if (unsubscribeItHistoryRef.current) unsubscribeItHistoryRef.current();
+        };
+    }, [db, isAuthReady, loggedIn, currentPublicUserId]);  Afhankelijkheden voor deze useEffect
+
+     Functie voor handmatige login
+    const handleLogin = async (e) = {
+        e.preventDefault();
+        setLoginError('');
+        if (!auth  !db  !userId) {
+            setLoginError(App is nog niet klaar. Probeer opnieuw.);
+            return;
+        }
+
+        try {
+            const q = query(collection(db, `artifacts${appId}publicdatausers`),
+                            where(username, ==, username),
+                            where(password, ==, newUserPassword));
+
+            const querySnapshot = await getDocs(q);
+
+            if (!querySnapshot.empty) {
+                const userDataFromPublic = querySnapshot.docs[0].data();
+                const publicDocId = querySnapshot.docs[0].id;
+
+                const userProfileDocRef = doc(db, `artifacts${appId}users${userId}profiledata`);
+                await setDoc(userProfileDocRef, {
+                    username userDataFromPublic.username,
+                    role userDataFromPublic.role  'player',
+                    publicUserId publicDocId
+                }, { merge true });
+
+                setUsername(userDataFromPublic.username);
+                setUserRole(userDataFromPublic.role  'player');
+                setCurrentPublicUserId(publicDocId);  Sla de publieke ID op
+                setLoggedIn(true);
+                setNewUserPassword('');
+
+            } else {
+                setLoginError(Onjuiste gebruikersnaam of wachtwoord.);
+            }
+        } catch (error) {
+            console.error(Fout bij inloggen, error);
+            setLoginError(Fout bij inloggen. Probeer opnieuw.);
+        }
+    };
+
+     Functie om uit te loggen
+    const handleLogout = async () = {
+        if (auth) {
+            try {
+                if (userId) {
+                    const userProfileDocRef = doc(db, `artifacts${appId}users${userId}profiledata`);
+                    await setDoc(userProfileDocRef, { username '', role 'guest', publicUserId null });
+                }
+
+                await signOut(auth);
+                setLoggedIn(false);
+                setUserId(null);
+                setUsername('');
+                setUserRole('guest');
+                setCurrentPublicUserId(null);  Wis de publieke ID
+                setLoginError('');
+                setNewUserPassword('');
+
+                if (initialAuthToken) {
+                    await signInWithCustomToken(auth, initialAuthToken);
+                } else {
+                    console.warn(Geen initialAuthToken na uitloggen. Gebruiker blijft volledig uitgelogd.);
+                }
+
+            } catch (error) {
+                console.error(Fout bij uitloggen, error);
+            }
+        }
+    };
+
+     Functie om een nieuwe gebruiker toe te voegen (alleen voor admin)
+    const addNewUser = async () = {
+        setAddUserError('');
+        if (!db  !newUsername  !newUserPassword) {
+            setAddUserError('Gebruikersnaam en wachtwoord zijn verplicht.');
+            return;
+        }
+
+        try {
+            const q = query(collection(db, `artifacts${appId}publicdatausers`), where(username, ==, newUsername));
+            const querySnapshot = await getDocs(q);
+            if (!querySnapshot.empty) {
+                setAddUserError('Deze gebruikersnaam bestaat al.');
+                return;
+            }
+
+            await addDoc(collection(db, `artifacts${appId}publicdatausers`), {
+                username newUsername,
+                password newUserPassword,
+                role 'player',
+            });
+            setNewUsername('');
+            setNewUserPassword('');
+            setShowAddUserModal(false);
+        } catch (error) {
+            console.error(Fout bij toevoegen nieuwe gebruiker, error);
+            setAddUserError('Fout bij toevoegen van gebruiker.');
+        }
+    };
+
+     Functie om een gebruiker te verwijderen (alleen voor admin) - Toont nu de custom modal
+    const handleDeleteUser = (userToDeleteId, userToDeleteUsername) = {
+        if (!db  userRole !== 'admin') {
+            showCustomNotification('Fout', 'Alleen de hoofdgebruiker mag gebruikers verwijderen.');
+            return;
+        }
+
+        if (userToDeleteId === currentPublicUserId) {
+            showCustomNotification('Fout', 'Je kunt je eigen account niet verwijderen!');
+            return;
+        }
+
+        setUserToDeleteDetails({ id userToDeleteId, username userToDeleteUsername });
+        setShowConfirmDeleteModal(true);
+    };
+
+     Functie die de daadwerkelijke verwijdering uitvoert na bevestiging
+    const confirmDeleteUser = async () = {
+        setShowConfirmDeleteModal(false);  Sluit de modal
+        if (!userToDeleteDetails) return;  Geen gebruiker om te verwijderen
+
+        const { id userToDeleteId, username userToDeleteUsername } = userToDeleteDetails;
+
+        try {
+             Verwijder de gebruiker uit de publieke collectie
+            await deleteDoc(doc(db, `artifacts${appId}publicdatausers`, userToDeleteId));
+
+             Controleer en reset de spelstatus als de verwijderde gebruiker 'm' of laatst getikt was
+            const gameDocRef = doc(db, `artifacts${appId}publicdatagame_statecurrent`);
+            const currentGameState = (await getDoc(gameDocRef)).data();
+
+            let updateGame = false;
+            const gameUpdateData = {};
+
+            if (currentGameState.itPlayerId === userToDeleteId) {
+                gameUpdateData.itPlayerId = null;
+                gameUpdateData.itPlayerName = 'Niemand';
+                gameUpdateData.itStartTime = null;
+                updateGame = true;
+            }
+            if (currentGameState.taggedPlayerId === userToDeleteId) {
+                gameUpdateData.taggedPlayerId = null;
+                gameUpdateData.taggedPlayerName = 'Niemand';
+                updateGame = true;
+            }
+
+            if (updateGame) {
+                await updateDoc(gameDocRef, gameUpdateData);
+            }
+
+            showCustomNotification('Succes', `Gebruiker ${userToDeleteUsername} is verwijderd.`);
+            setUserToDeleteDetails(null);  Reset details
+        } catch (error) {
+            console.error(Fout bij verwijderen gebruiker, error);
+            showCustomNotification('Fout', `Kon gebruiker ${userToDeleteUsername} niet verwijderen.`);
+        }
+    };
+
+     Functie om het spel te startenresetten
+    const startGame = async () = {
+        if (!db  userRole !== 'admin') {
+            showCustomNotification('Fout', 'Alleen de hoofdgebruiker mag het spel startenresetten.');
+            return;
+        }
+        const gameDocRef = doc(db, `artifacts${appId}publicdatagame_statecurrent`);
+
+        try {
+            const currentGameState = (await getDoc(gameDocRef)).data();
+            if (currentGameState && currentGameState.itPlayerId && currentGameState.itStartTime) {
+                const now = Timestamp.now();
+                const durationMs = now.toMillis() - currentGameState.itStartTime.toMillis();
+                await addDoc(collection(db, `artifacts${appId}publicdatait_durations`), {
+                    userId currentGameState.itPlayerId,
+                    username currentGameState.itPlayerName,
+                    startTime currentGameState.itStartTime,
+                    endTime now,
+                    durationMs durationMs
+                });
+            }
+
+            await setDoc(gameDocRef, {
+                itPlayerId null,
+                itPlayerName 'Niemand',
+                taggedPlayerId null,
+                taggedPlayerName 'Niemand',
+                gameActive true,
+                itStartTime null
+            });
+        } catch (error) {
+            console.error(Fout bij starten spel, error);
+            showCustomNotification('Fout', 'Kon het spel niet startenresetten.');
+        }
+    };
+
+     Functie om jezelf 'm' te maken
+    const makeMyselfIt = async () = {
+        if (!db  !userId  !username  itPlayerId !== null  !gameActive  !currentPublicUserId) {
+            showCustomNotification('Fout', 'Iemand is al 'm' of het spel is niet actief.');
+            return;
+        }
+        const gameDocRef = doc(db, `artifacts${appId}publicdatagame_statecurrent`);
+        try {
+            await updateDoc(gameDocRef, {
+                itPlayerId currentPublicUserId,  Gebruik publieke ID
+                itPlayerName username,
+                taggedPlayerId null,
+                taggedPlayerName 'Niemand',
+                gameActive true,
+                itStartTime serverTimestamp()
+            });
+        } catch (error) {
+            console.error(Fout bij jezelf 'm' maken, error);
+            showCustomNotification('Fout', 'Kon jezelf niet 'm' maken.');
+        }
+    };
+
+     Functie om een speler te tikken
+    const tagPlayer = async (targetUserId, targetUsername) = {
+        if (!db  !currentPublicUserId  itPlayerId !== currentPublicUserId  !gameActive) {  Vergelijk met currentPublicUserId
+            showCustomNotification('Fout', 'Je bent niet 'm' of het spel is niet actief.');
+            return;
+        }
+        if (targetUserId === currentPublicUserId) {  Vergelijk met currentPublicUserId
+            showCustomNotification('Fout', 'Je kunt jezelf niet tikken!');
+            return;
+        }
+
+        const gameDocRef = doc(db, `artifacts${appId}publicdatagame_statecurrent`);
+        try {
+            const currentGameState = (await getDoc(gameDocRef)).data();
+            if (currentGameState && currentGameState.itPlayerId && currentGameState.itStartTime) {
+                const now = serverTimestamp();
+                const clientNow = Timestamp.now();
+                const durationMs = clientNow.toMillis() - currentGameState.itStartTime.toMillis();
+
+                await addDoc(collection(db, `artifacts${appId}publicdatait_durations`), {
+                    userId currentGameState.itPlayerId,
+                    username currentGameState.itPlayerName,
+                    startTime currentGameState.itStartTime,
+                    endTime now,
+                    durationMs durationMs
+                });
+            }
+
+            await updateDoc(gameDocRef, {
+                taggedPlayerId targetUserId,
+                taggedPlayerName targetUsername,
+                itPlayerId targetUserId,
+                itPlayerName targetUsername,
+                itStartTime serverTimestamp()
+            });
+            showCustomNotification('Getikt!', `${targetUsername} is nu 'm'!`);
+
+            console.log(`[Simulatie Notificatie] Server zou nu een push notificatie sturen naar ${targetUsername} (${targetUserId})`);
+
+        } catch (error) {
+            console.error(Fout bij tikken speler, error);
+            showCustomNotification('Fout', 'Kon speler niet tikken.');
+        }
+    };
+
+     Functie om een aangepaste notificatie te tonen
+    const showCustomNotification = (title, message) = {
+        setNotificationMessage(message);
+        setShowNotificationModal(true);
+
+        if (Notification.permission === granted) {
+            new Notification(title, { body message, icon 'httpsplacehold.co48x48000000FFFFFFtext=T' });
+        } else if (Notification.permission !== denied) {
+            Notification.requestPermission().then(permission = {
+                if (permission === granted) {
+                    new Notification(title, { body message, icon 'httpsplacehold.co48x48000000FFFFFFtext=T' });
+                }
+            });
+        }
+    };
+
+     Laadscherm
+    if (loading) {
+        return (
+            div className=min-h-screen flex items-center justify-center bg-gray-100 p-4
+                div className=text-center text-gray-700 text-lgLaden...div
+            div
+        );
+    }
+
+     Login scherm
+    if (!loggedIn) {
+        return (
+            div className=min-h-screen flex items-center justify-center bg-gradient-to-br from-blue-400 to-purple-600 p-4
+                div className=bg-white p-8 rounded-xl shadow-2xl w-full max-w-md text-center
+                    h2 className=text-3xl font-extrabold text-gray-800 mb-6Welkom bij Tikkertje!h2
+                    p className=text-gray-600 mb-6Log in om te beginnen.p
+                    form onSubmit={handleLogin} className=space-y-4
+                        div
+                            input
+                                type=text
+                                placeholder=Gebruikersnaam
+                                value={username}
+                                onChange={(e) = setUsername(e.target.value)}
+                                className=w-full px-4 py-2 border border-gray-300 rounded-lg focusring-blue-500 focusborder-blue-500 text-gray-800
+                            
+                        div
+                        div
+                            input
+                                type=password
+                                placeholder=Wachtwoord
+                                value={newUserPassword}
+                                onChange={(e) = setNewUserPassword(e.target.value)}
+                                className=w-full px-4 py-2 border border-gray-300 rounded-lg focusring-blue-500 focusborder-blue-500 text-gray-800
+                            
+                        div
+                        {loginError && p className=text-red-500 text-sm{loginError}p}
+                        button
+                            type=submit
+                            className=w-full bg-blue-600 hoverbg-blue-700 text-white font-bold py-2 px-4 rounded-lg shadow-md transition duration-300 ease-in-out transform hoverscale-105
+                        
+                            Inloggen
+                        button
+                    form
+                div
+            div
+        );
+    }
+
+     Hoofd-app interface
+    return (
+        div className=min-h-screen bg-gradient-to-br from-indigo-500 to-purple-700 text-white p-4 font-inter flex flex-col items-center justify-center
+            div className=bg-white bg-opacity-10 backdrop-filter backdrop-blur-lg p-6 rounded-3xl shadow-2xl w-full max-w-4xl border border-white border-opacity-20 flex flex-col gap-6
+
+                { Header en Gebruikersinfo }
+                div className=flex justify-between items-center pb-4 border-b border-white border-opacity-20
+                    h1 className=text-4xl font-extrabold text-whiteTikkertje PWAh1
+                    div className=flex items-center space-x-3
+                        User className=text-white size={24} 
+                        span className=text-lg font-semibold
+                            {username} ({userRole})
+                            {userId && span className=text-sm text-gray-300 ml-2(Firebase ID {userId.substring(0, 6)}...)span}
+                            {currentPublicUserId && span className=text-sm text-gray-300 ml-2(Public ID {currentPublicUserId.substring(0, 6)}...)span}
+                        span
+                        button
+                            onClick={handleLogout}
+                            className=ml-4 p-2 rounded-full bg-red-500 hoverbg-red-600 transition duration-200 shadow-md
+                            title=Uitloggen
+                        
+                            DoorClosed size={20} 
+                        button
+                    div
+                div
+
+                { Admin Dashboard (alleen voor Ruben) }
+                {userRole === 'admin' && (
+                    div className=bg-white bg-opacity-15 p-5 rounded-2xl shadow-inner border border-white border-opacity-20
+                        h2 className=text-2xl font-bold mb-4 flex items-center gap-2Plus  Admin Paneelh2
+                        button
+                            onClick={() = setShowAddUserModal(true)}
+                            className=w-full bg-green-500 hoverbg-green-600 text-white font-bold py-3 px-6 rounded-xl shadow-lg transition duration-300 ease-in-out transform hoverscale-105 flex items-center justify-center gap-2
+                        
+                            Plus size={20}  Nieuwe Gebruiker Toevoegen
+                        button
+                    div
+                )}
+
+                { Spelstatus }
+                div className=bg-white bg-opacity-15 p-5 rounded-2xl shadow-inner border border-white border-opacity-20
+                    h2 className=text-2xl font-bold mb-4 flex items-center gap-2Play  Spelstatush2
+                    div className=grid grid-cols-1 mdgrid-cols-2 gap-4 text-lg
+                        pstrongWie is 'mstrong span className=font-semibold text-yellow-300{itPlayerName}spanp
+                        pstrongLaatst getiktstrong span className=font-semibold text-red-300{taggedPlayerName}spanp
+                        p className=col-span-fullstrongSpel actiefstrong span className={`font-semibold ${gameActive  'text-green-300'  'text-gray-300'}`}{gameActive  'Ja'  'Nee'}spanp
+                    div
+                div
+
+                { Spel Acties }
+                div className=bg-white bg-opacity-15 p-5 rounded-2xl shadow-inner border border-white border-opacity-20
+                    h2 className=text-2xl font-bold mb-4 flex items-center gap-2Hand  Spel Actiesh2
+                    div className=grid grid-cols-1 mdgrid-cols-2 gap-4
+                        button
+                            onClick={startGame}
+                            disabled={userRole !== 'admin'}
+                            className={`font-bold py-3 px-6 rounded-xl shadow-lg transition duration-300 ease-in-out transform hoverscale-105 flex items-center justify-center gap-2 ${userRole === 'admin'  'bg-blue-500 hoverbg-blue-600 text-white'  'bg-gray-400 text-gray-700 cursor-not-allowed'}`}
+                        
+                            Play size={20}  StartReset Spel
+                        button
+                        button
+                            onClick={makeMyselfIt}
+                            disabled={!gameActive  itPlayerId !== null}
+                            className={`font-bold py-3 px-6 rounded-xl shadow-lg transition duration-300 ease-in-out transform hoverscale-105 flex items-center justify-center gap-2 ${(!gameActive  itPlayerId !== null)  'bg-gray-400 text-gray-700 cursor-not-allowed'  'bg-yellow-500 hoverbg-yellow-600 text-black'}`}
+                        
+                            User size={20}  Maak Mij 'm'
+                        button
+                    div
+                div
+
+                { Spelerslijst en Tikken }
+                div className=bg-white bg-opacity-15 p-5 rounded-2xl shadow-inner border border-white border-opacity-20
+                    h2 className=text-2xl font-bold mb-4 flex items-center gap-2Tag  Spelersh2
+                    div className=grid grid-cols-1 smgrid-cols-2 lggrid-cols-3 gap-4
+                        {allUsers.length  0  (
+                            allUsers.map(user = (
+                                div key={user.id} className=bg-white bg-opacity-20 p-4 rounded-xl flex flex-col items-center justify-between gap-2
+                                    span className=text-xl font-semibold text-white{user.username}span
+                                    span className=text-sm text-gray-300 break-allID {user.id}span
+                                    div className=flex items-center gap-2 mt-2
+                                        {itPlayerId === currentPublicUserId && gameActive && user.id !== currentPublicUserId && (
+                                            button
+                                                onClick={() = tagPlayer(user.id, user.username)}
+                                                className=bg-purple-500 hoverbg-purple-600 text-white font-bold py-2 px-4 rounded-lg shadow-md transition duration-300 ease-in-out transform hoverscale-105 flex items-center justify-center gap-2
+                                            
+                                                Tag size={18}  Tik
+                                            button
+                                        )}
+                                        {userRole === 'admin' && user.id !== currentPublicUserId && (  Verwijderknop alleen voor admin, niet voor eigen account
+                                            button
+                                                onClick={() = handleDeleteUser(user.id, user.username)}
+                                                className=bg-red-500 hoverbg-red-600 text-white font-bold p-2 rounded-lg shadow-md transition duration-300 ease-in-out transform hoverscale-105
+                                                title={`Verwijder ${user.username}`}
+                                            
+                                                Trash2 size={18} 
+                                            button
+                                        )}
+                                    div
+                                    {itPlayerId === user.id && (
+                                        span className=mt-2 text-green-300 font-boldIS 'M'span
+                                    )}
+                                    {taggedPlayerId === user.id && taggedPlayerId !== itPlayerId && (
+                                        span className=mt-2 text-red-300 font-boldLAATST GETIKTspan
+                                    )}
+                                div
+                            ))
+                        )  (
+                            p className=col-span-full text-center text-gray-300Geen gebruikers gevonden. Voeg er een paar toe via het Admin Paneel.p
+                        )}
+                    div
+                div
+
+                { Scorebord }
+                div className=bg-white bg-opacity-15 p-5 rounded-2xl shadow-inner border border-white border-opacity-20
+                    h2 className=text-2xl font-bold mb-4 flex items-center gap-2Trophy  Scorebord ('M'-tijd)h2
+                    {playerScores.length  0  (
+                        div className=overflow-x-auto
+                            table className=min-w-full bg-white bg-opacity-10 rounded-lg overflow-hidden
+                                thead
+                                    tr className=bg-white bg-opacity-20
+                                        th className=py-2 px-4 text-left text-sm font-semibold text-whiteSpelerth
+                                        th className=py-2 px-4 text-left text-sm font-semibold text-whiteTotale 'M'-tijdth
+                                    tr
+                                thead
+                                tbody
+                                    {playerScores.map((score, index) = (
+                                        tr key={score.username} className=border-t border-white border-opacity-10
+                                            td className=py-2 px-4 text-white{score.username}td
+                                            td className=py-2 px-4 text-white{formatDuration(score.totalDurationMs)}td
+                                        tr
+                                    ))}
+                                tbody
+                            table
+                        div
+                    )  (
+                        p className=text-center text-gray-300Nog geen scores beschikbaar. Speel een rondje!p
+                    )}
+                div
+
+                { Geschiedenis van m-periodes }
+                div className=bg-white bg-opacity-15 p-5 rounded-2xl shadow-inner border border-white border-opacity-20
+                    h2 className=text-2xl font-bold mb-4 flex items-center gap-2History  'M'-Geschiedenish2
+                    {itHistory.length  0  (
+                        div className=overflow-x-auto
+                            table className=min-w-full bg-white bg-opacity-10 rounded-lg overflow-hidden
+                                thead
+                                    tr className=bg-white bg-opacity-20
+                                        th className=py-2 px-4 text-left text-sm font-semibold text-whiteSpelerth
+                                        th className=py-2 px-4 text-left text-sm font-semibold text-whiteStarttijdth
+                                        th className=py-2 px-4 text-left text-sm font-semibold text-whiteEindtijdth
+                                        th className=py-2 px-4 text-left text-sm font-semibold text-whiteDuurth
+                                    tr
+                                thead
+                                tbody
+                                    {itHistory.map((entry) = (
+                                        tr key={entry.id} className=border-t border-white border-opacity-10
+                                            td className=py-2 px-4 text-white{entry.username}td
+                                            td className=py-2 px-4 text-white
+                                                {entry.startTime  new Date(entry.startTime.toMillis()).toLocaleTimeString()  'NA'}
+                                            td
+                                            td className=py-2 px-4 text-white
+                                                {entry.endTime  new Date(entry.endTime.toMillis()).toLocaleTimeString()  'NA'}
+                                            td
+                                            td className=py-2 px-4 text-white{formatDuration(entry.durationMs)}td
+                                        tr
+                                    ))}
+                                tbody
+                            table
+                        div
+                    )  (
+                        p className=text-center text-gray-300Nog geen 'm'-geschiedenis beschikbaar.p
+                    )}
+                div
+            div
+
+            { Notificatie Modaal }
+            {showNotificationModal && (
+                div className=fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4
+                    div className=bg-white p-8 rounded-xl shadow-2xl text-center w-full max-w-sm
+                        h3 className=text-2xl font-bold text-gray-800 mb-4Notificatie!h3
+                        p className=text-gray-700 mb-6{notificationMessage}p
+                        button
+                            onClick={() = setShowNotificationModal(false)}
+                            className=bg-blue-500 hoverbg-blue-600 text-white font-bold py-2 px-4 rounded-lg shadow-md transition duration-300 ease-in-out
+                        
+                            Sluiten
+                        button
+                    div
+                div
+            )}
+
+            { Nieuwe Gebruiker Toevoegen Modaal }
+            {showAddUserModal && (
+                div className=fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4
+                    div className=bg-white p-8 rounded-xl shadow-2xl text-center w-full max-w-md
+                        h3 className=text-2xl font-bold text-gray-800 mb-4Nieuwe Gebruiker Toevoegenh3
+                        form onSubmit={(e) = { e.preventDefault(); addNewUser(); }} className=space-y-4
+                            div
+                                input
+                                    type=text
+                                    placeholder=Gebruikersnaam
+                                    value={newUsername}
+                                    onChange={(e) = setNewUsername(e.target.value)}
+                                    className=w-full px-4 py-2 border border-gray-300 rounded-lg focusring-blue-500 focusborder-blue-500 text-gray-800
+                                
+                            div
+                            div
+                                input
+                                    type=password
+                                    placeholder=Wachtwoord (voor demo, niet veilig)
+                                    value={newUserPassword}
+                                    onChange={(e) = setNewUserPassword(e.target.value)}
+                                    className=w-full px-4 py-2 border border-gray-300 rounded-lg focusring-blue-500 focusborder-blue-500 text-gray-800
+                                
+                            div
+                            {addUserError && p className=text-red-500 text-sm{addUserError}p}
+                            div className=flex justify-end gap-4
+                                button
+                                    type=button
+                                    onClick={() = setShowAddUserModal(false)}
+                                    className=bg-gray-300 hoverbg-gray-400 text-gray-800 font-bold py-2 px-4 rounded-lg shadow-md transition duration-300 ease-in-out
+                                
+                                    Annuleren
+                                button
+                                button
+                                    type=submit
+                                    className=bg-green-500 hoverbg-green-600 text-white font-bold py-2 px-4 rounded-lg shadow-md transition duration-300 ease-in-out
+                                
+                                    Toevoegen
+                                button
+                            div
+                        form
+                    div
+                div
+            )}
+
+            { Bevestig Verwijder Modaal }
+            {showConfirmDeleteModal && userToDeleteDetails && (
+                div className=fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4
+                    div className=bg-white p-8 rounded-xl shadow-2xl text-center w-full max-w-sm
+                        h3 className=text-2xl font-bold text-gray-800 mb-4Gebruiker Verwijderenh3
+                        p className=text-gray-700 mb-6Weet je zeker dat je gebruiker span className=font-semibold{userToDeleteDetails.username}span wilt verwijderen Dit kan niet ongedaan gemaakt worden.p
+                        div className=flex justify-center gap-4
+                            button
+                                onClick={() = setShowConfirmDeleteModal(false)}
+                                className=bg-gray-300 hoverbg-gray-400 text-gray-800 font-bold py-2 px-4 rounded-lg shadow-md transition duration-300 ease-in-out
+                            
+                                Annuleren
+                            button
+                            button
+                                onClick={confirmDeleteUser}
+                                className=bg-red-500 hoverbg-red-600 text-white font-bold py-2 px-4 rounded-lg shadow-md transition duration-300 ease-in-out
+                            
+                                Verwijderen
+                            button
+                        div
+                    div
+                div
+            )}
+        div
+    );
+};
+
+export default App;
